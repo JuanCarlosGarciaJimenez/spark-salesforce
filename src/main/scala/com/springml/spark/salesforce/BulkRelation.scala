@@ -34,7 +34,8 @@ case class BulkRelation(
     userSchema: StructType,
     sqlContext: SQLContext,
     inferSchema: Boolean,
-    timeout: Long) extends BaseRelation with TableScan {
+    timeout: Long,
+    maxCharacterSize: Int) extends BaseRelation with TableScan {
 
   import sqlContext.sparkSession.implicits._
 
@@ -67,8 +68,34 @@ case class BulkRelation(
       val fetchBatchInfo = (batchInfoId: String) => {
         val resultIds = bulkAPI.getBatchResultIds(jobId, batchInfoId)
 
-        val result = resultIds.asScala.map(id => splitCsvByRows(bulkAPI.getBatchResult(jobId, batchInfoId, id)))
-        result.flatten
+        val result = bulkAPI.getBatchResult(jobId, batchInfoId, resultIds.get(resultIds.size() - 1))
+
+        // Use Csv parser to split CSV by rows to cover edge cases (ex. escaped characters, new line within string, etc)
+        def splitCsvByRows(csvString: String): Seq[String] = {
+          // The CsvParser interface only interacts with IO, so StringReader and StringWriter
+          val inputReader = new StringReader(csvString)
+
+          val parserSettings = new CsvParserSettings()
+          parserSettings.setLineSeparatorDetectionEnabled(true)
+          parserSettings.getFormat.setNormalizedNewline(' ')
+          parserSettings.setMaxCharsPerColumn(maxCharacterSize)
+
+          val readerParser = new CsvParser(parserSettings)
+          val parsedInput = readerParser.parseAll(inputReader).asScala
+
+          val outputWriter = new StringWriter()
+
+          val writerSettings = new CsvWriterSettings()
+          writerSettings.setQuoteAllFields(true)
+          writerSettings.setQuoteEscapingEnabled(true)
+
+          val writer = new CsvWriter(outputWriter, writerSettings)
+          parsedInput.foreach { writer.writeRow(_) }
+
+          outputWriter.toString.lines.toList
+        }
+
+        splitCsvByRows(result)
       }
 
       val csvData = sqlContext
